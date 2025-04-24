@@ -11,6 +11,7 @@
 #include <esp_lcd_panel_vendor.h>
 #include <driver/i2c_master.h>
 #include <driver/spi_common.h>
+#include <driver/gpio.h>  // 添加GPIO驱动头文件
 #include <wifi_station.h>
 
 #define TAG "LichuangDevBoard"
@@ -18,29 +19,20 @@
 LV_FONT_DECLARE(font_puhui_20_4);
 LV_FONT_DECLARE(font_awesome_20_4);
 
-class Pca9557 : public I2cDevice {
-public:
-    Pca9557(i2c_master_bus_handle_t i2c_bus, uint8_t addr) : I2cDevice(i2c_bus, addr) {
-        WriteReg(0x01, 0x03);
-        WriteReg(0x03, 0xf8);
-    }
-
-    void SetOutputState(uint8_t bit, uint8_t level) {
-        uint8_t data = ReadReg(0x01);
-        data = (data & ~(1 << bit)) | (level << bit);
-        WriteReg(0x01, data);
-    }
-};
-
+// 移除 Pca9557 类的定义
 
 class LichuangDevBoard : public WifiBoard {
 private:
     i2c_master_bus_handle_t i2c_bus_;
-    i2c_master_dev_handle_t pca9557_handle_;
+    // 移除 i2c_master_dev_handle_t pca9557_handle_;
     Button boot_button_;
     LcdDisplay* display_;
-    Pca9557* pca9557_;
-
+    // 移除 Pca9557* pca9557_;
+    
+    // 添加LCD复位和PA使能控制引脚
+    const gpio_num_t lcd_cs_pin_ = GPIO_NUM_47;    // 选择一个可用的GPIO引脚，替代PCA9557的IO0
+    const gpio_num_t pa_en_pin_ = GPIO_NUM_48;     // 选择一个可用的GPIO引脚，替代PCA9557的IO1
+    
     void InitializeI2c() {
         // Initialize I2C peripheral
         i2c_master_bus_config_t i2c_bus_cfg = {
@@ -56,9 +48,21 @@ private:
             },
         };
         ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_cfg, &i2c_bus_));
-
-        // Initialize PCA9557
-        pca9557_ = new Pca9557(i2c_bus_, 0x19);
+        
+        // 初始化LCD片选引脚和PA使能引脚
+        gpio_config_t io_conf = {};
+        io_conf.intr_type = GPIO_INTR_DISABLE;
+        io_conf.mode = GPIO_MODE_OUTPUT;
+        io_conf.pin_bit_mask = (1ULL << lcd_cs_pin_) | (1ULL << pa_en_pin_);
+        io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+        gpio_config(&io_conf);
+        
+        // 默认设置LCD片选引脚为高电平（不选中）
+        gpio_set_level(lcd_cs_pin_, 1);
+        
+        // 默认设置PA使能引脚为高电平（使能扬声器输出）
+        gpio_set_level(pa_en_pin_, 1);
     }
 
     void InitializeSpi() {
@@ -93,7 +97,7 @@ private:
         // 液晶屏控制IO初始化
         ESP_LOGD(TAG, "Install panel IO");
         esp_lcd_panel_io_spi_config_t io_config = {};
-        io_config.cs_gpio_num = GPIO_NUM_NC;
+        io_config.cs_gpio_num = lcd_cs_pin_;  // 使用我们自己的CS引脚
         io_config.dc_gpio_num = GPIO_NUM_39;
         io_config.spi_mode = 2;
         io_config.pclk_hz = 80 * 1000 * 1000;
@@ -105,13 +109,14 @@ private:
         // 初始化液晶屏驱动芯片ST7789
         ESP_LOGD(TAG, "Install LCD driver");
         esp_lcd_panel_dev_config_t panel_config = {};
-        panel_config.reset_gpio_num = GPIO_NUM_NC;
+        // 根据电路图，复位引脚直接连接到ESP32-S3
+        panel_config.reset_gpio_num = GPIO_NUM_4;  // 假设复位引脚连接到GPIO4，请根据实际情况修改
         panel_config.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB;
         panel_config.bits_per_pixel = 16;
         ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(panel_io, &panel_config, &panel));
         
         esp_lcd_panel_reset(panel);
-        pca9557_->SetOutputState(0, 0);
+        // 不需要额外控制复位信号，esp_lcd_panel_reset已经处理了
 
         esp_lcd_panel_init(panel);
         esp_lcd_panel_invert_color(panel, true);
@@ -143,6 +148,11 @@ public:
         GetBacklight()->RestoreBrightness();
     }
 
+    // 添加控制PA使能的方法
+    void SetPaEnable(bool enable) {
+        gpio_set_level(pa_en_pin_, enable ? 1 : 0);
+    }
+
     virtual AudioCodec* GetAudioCodec() override {
         static BoxAudioCodec audio_codec(
             i2c_bus_, 
@@ -153,7 +163,7 @@ public:
             AUDIO_I2S_GPIO_WS, 
             AUDIO_I2S_GPIO_DOUT, 
             AUDIO_I2S_GPIO_DIN,
-            GPIO_NUM_NC, 
+            pa_en_pin_,  // 使用我们自己的PA使能引脚替代GPIO_NUM_NC
             AUDIO_CODEC_ES8311_ADDR, 
             AUDIO_CODEC_ES7210_ADDR, 
             AUDIO_INPUT_REFERENCE);
